@@ -9,7 +9,9 @@ quirk, reproduced with minimal probes) - Python reads hook stdin reliably.
 
 Checks (same as the .sh): frontmatter delimiters, no tabs in frontmatter,
 required fields (date/type/tags/ai-first), '## For future Claude' preamble,
-banned non-ASCII substitution characters.
+banned non-ASCII substitution characters, secret material (private keys,
+AWS/GitHub/Slack/Google API keys, quoted passwords - ported from the .sh's
+v0.14.0 check 6).
 
 Vault-convention exceptions (per this vault's _CLAUDE.md, added in this port):
   - Daily/     : only date + tags required (Section 5) - preamble still checked
@@ -24,7 +26,19 @@ Exit codes:
 """
 import json
 import os
+import re
 import sys
+
+SECRET_PATTERNS = [
+    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"), "private key block"),
+    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "AWS access key id"),
+    (re.compile(r"\bsk-[A-Za-z0-9_-]{24,}\b"), "sk- API key"),
+    (re.compile(r"\bghp_[A-Za-z0-9]{36}\b"), "GitHub personal token"),
+    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{22,}\b"), "GitHub fine-grained token"),
+    (re.compile(r"\bxox[bpars]-[A-Za-z0-9-]{10,}\b"), "Slack token"),
+    (re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"), "Google API key"),
+    (re.compile(r"(?i)\b(?:password|passwd)\s*[:=]\s*['\"][^'\"\s]{8,}['\"]"), "quoted password assignment"),
+]
 
 BANNED = {
     '—': ('U+2014 em-dash', ' - '),
@@ -132,6 +146,21 @@ def main() -> int:
     if hits:
         warnings.append(f'{basename} contains banned non-ASCII substitution characters:')
         warnings.extend(hits)
+
+    # Check 6: secrets never belong in a vault note (high-precision patterns only -
+    # a false positive here trains people to ignore the hook)
+    secret_hits = []
+    for lineno, line in enumerate(lines, 1):
+        for pat, label in SECRET_PATTERNS:
+            if pat.search(line):
+                secret_hits.append(
+                    f'    line {lineno}: looks like a {label} - secrets never belong in '
+                    f'vault notes; keep them in ~/.config/obsidian-second-brain/.env or a '
+                    f'password manager and reference them by NAME only')
+                break
+    if secret_hits:
+        warnings.append(f'{basename} appears to contain secret material:')
+        warnings.extend(secret_hits)
 
     if warnings:
         sys.stderr.write(f'AI-first warnings on {basename}:\n')
