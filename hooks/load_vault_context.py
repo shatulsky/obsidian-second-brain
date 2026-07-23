@@ -142,7 +142,7 @@ def main() -> int:
     if claude_md is not None:
         # Characters, not bytes: the cap counts characters and a CJK manual runs
         # about three bytes to each one, so st_size would reject manuals that fit.
-        text = claude_md.read_text(encoding="utf-8")
+        text = claude_md.read_text(encoding="utf-8-sig")
         manual = full_manual_block(claude_md, text)
         # Measured against the whole payload, because the skill-root block is in
         # it too and the cap applies to the string the hook returns.

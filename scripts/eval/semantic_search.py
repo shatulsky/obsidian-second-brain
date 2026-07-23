@@ -327,7 +327,12 @@ def build_index(vault: Path, verbose: bool = True) -> dict:
     degraded_paths: list[str] = []
     dropped_paths: list[str] = []
 
-    for md in _iter_notes(vault):
+    all_notes = list(_iter_notes(vault))
+    start = time.monotonic()
+    if verbose:
+        print(f"[semantic] scanning {len(all_notes)} notes under {vault}", file=sys.stderr)
+
+    for i, md in enumerate(all_notes, 1):
         rel = md.relative_to(vault).as_posix()
         if _excluded(rel):
             skipped += 1
@@ -350,6 +355,8 @@ def build_index(vault: Path, verbose: bool = True) -> dict:
         embed_text = body if body else header.strip()
         if not embed_text.strip():
             continue
+        if verbose:
+            print(f"  [{i}/{len(all_notes)}] embedding {rel} ...", file=sys.stderr)
         degraded_note = False
         try:
             vecs = embed_note_chunks(embed_text, header=header)
@@ -375,8 +382,13 @@ def build_index(vault: Path, verbose: bool = True) -> dict:
             degraded_paths.append(rel)
         new[rel] = entry
         embedded += 1
-        if verbose and embedded % 50 == 0:
-            print(f"  embedded {embedded} notes...", file=sys.stderr)
+        if verbose and embedded % 10 == 0:
+            elapsed = time.monotonic() - start
+            print(
+                f"  ...{embedded} embedded, {reused} cached, {failed} failed so far "
+                f"({elapsed:.0f}s elapsed, {i}/{len(all_notes)} scanned)",
+                file=sys.stderr,
+            )
 
     out = {"model": EMBED_MODEL, "format": 2, "notes": new}
     # ensure_ascii=False (#259): the default escapes every non-ASCII note path
@@ -390,9 +402,10 @@ def build_index(vault: Path, verbose: bool = True) -> dict:
     if verbose:
         total_eligible = len(new) + failed
         pct = (100.0 * len(new) / total_eligible) if total_eligible else 100.0
+        elapsed = time.monotonic() - start
         print(
             f"[semantic] indexed {len(new)} notes ({embedded} new, {reused} cached, "
-            f"{skipped} excluded, {degraded} degraded, {failed} dropped) -> {index_path}",
+            f"{skipped} excluded, {degraded} degraded, {failed} dropped) in {elapsed:.0f}s -> {index_path}",
             file=sys.stderr,
         )
         print(f"[semantic] coverage: {len(new)}/{total_eligible} ({pct:.1f}%)", file=sys.stderr)

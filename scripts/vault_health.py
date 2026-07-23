@@ -8,6 +8,8 @@ Audits an Obsidian vault for structural issues:
 - Stale tasks (overdue, no recent activity)
 - Notes missing frontmatter
 - Notes with frontmatter trapped in a leading ```markdown code fence (unwrap, do not add)
+- Byte-level corruption: NUL bytes, or a duplicate frontmatter block buried behind a
+  mid-file BOM (merge the blocks, do not add another; rg/grep are BLIND to NUL files)
 - Empty folders
 - Wanted notes (links to notes not written yet - a wishlist, not errors)
 - Templates left in notes (unfilled Templater syntax)
@@ -366,6 +368,7 @@ def load_vault(vault: Path, excludes=None, only: str | None = None) -> dict:
             "tags": parse_tags(frontmatter),
             "due": due_match.group(1) if due_match else None,
             "size": len(content),
+            "skip_link_check": bool(re.search(r"^skip-link-check:\s*true\s*$", frontmatter, re.MULTILINE)),
         }
     return notes
 
@@ -724,6 +727,54 @@ def check_code_fence_wrapped(notes: dict) -> list:
     return issues
 
 
+def check_byte_corruption(vault: Path) -> list:
+    """Byte-level integrity scan (raw bytes - text tools cannot do this).
+
+    Two signatures, both introduced by BOM/byte-blind bulk writes (2026-06-29
+    incident, ~221 files):
+    - NUL bytes anywhere: git and ripgrep classify the file as binary and
+      silently skip it, so every text-level search goes blind on it.
+    - A BOM + '---' after byte 0: a real frontmatter block buried under a
+      prepended one. The fix is to MERGE the blocks (keep the buried original,
+      fold in keys unique to the prepended block), never to add another.
+    """
+    issues = []
+    bom = b"\xef\xbb\xbf"
+    for md in vault.rglob("*.md"):
+        parts = md.relative_to(vault).parts
+        if any(p in EXCLUDE_DIRS for p in parts):
+            continue
+        rel = str(md.relative_to(vault))
+        try:
+            raw = md.read_bytes()
+        except OSError:
+            continue
+        nul_count = raw.count(b"\x00")
+        if nul_count:
+            issues.append({
+                "type": "nul_bytes",
+                "severity": "error",
+                "message": f"NUL bytes ({nul_count}) - file is invisible to grep/rg/git-diff: {rel}",
+                "files": [rel],
+            })
+        body = raw[3:] if raw.startswith(bom) else raw
+        if bom + b"---" in body:
+            issues.append({
+                "type": "buried_frontmatter",
+                "severity": "error",
+                "message": f"Duplicate frontmatter buried behind a mid-file BOM - merge, don't add: {rel}",
+                "files": [rel],
+            })
+        elif bom in body:
+            issues.append({
+                "type": "stray_bom",
+                "severity": "warning",
+                "message": f"Stray BOM after byte 0: {rel}",
+                "files": [rel],
+            })
+    return issues
+
+
 def check_empty_folders(vault: Path, excludes=None) -> list:
     excludes = excludes or _NO_EXCLUDES
     issues = []
@@ -967,6 +1018,8 @@ def check_wanted_notes(notes: dict, vault: Path, excludes=None) -> list:
     for rel, note in notes.items():
         if excludes.skip_link_scan(Path(rel).as_posix()):
             continue
+        if note.get("skip_link_check"):
+            continue
         # Re-extract links from code-stripped content so example wikilinks inside
         # code fences / inline code are not counted (issue #82).
         real_links = [
@@ -1205,6 +1258,7 @@ def run_health_check(vault: Path) -> dict:
         ("Orphans", check_orphans(notes)),
         ("Stale tasks", check_stale_tasks(notes)),
         ("Code-fence-wrapped notes", check_code_fence_wrapped(notes)),
+        ("Byte corruption (NUL/BOM)", check_byte_corruption(vault)),
         ("Missing frontmatter", check_missing_frontmatter(notes)),
         ("Invalid tags", check_tag_syntax(notes)),
         ("Empty folders", check_empty_folders(vault, excludes)),
