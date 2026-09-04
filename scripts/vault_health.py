@@ -587,11 +587,16 @@ def check_orphans(notes: dict) -> list:
     for src_rel, note in notes.items():
         for link in note["links"]:
             lk = _nfc(link).lower()
-            # An incoming link may carry the .md extension ([[note.md]]); it still
-            # targets the same note, so strip it before matching against stems.
+            # An incoming link may carry a redundant .md extension ([[note.md]]);
+            # it still targets the same note, so also register the stripped form.
+            # Keep the UNSTRIPPED form too - a note whose real title itself ends in
+            # ".md" (e.g. "... and Consolidate _CLAUDE.md") needs the untouched key,
+            # or its own stem (which keeps the trailing ".md") never matches.
+            variants = {lk, lk.replace(" ", "-"), lk.rsplit("/", 1)[-1]}
             if lk.endswith(".md"):
-                lk = lk[:-3]
-            for key in {lk, lk.replace(" ", "-"), lk.rsplit("/", 1)[-1]}:
+                stripped = lk[:-3]
+                variants |= {stripped, stripped.replace(" ", "-"), stripped.rsplit("/", 1)[-1]}
+            for key in variants:
                 link_sources[key].add(src_rel)
 
     def _has_incoming(rel: str, keys) -> bool:
@@ -602,8 +607,14 @@ def check_orphans(notes: dict) -> list:
                     "Private", "Journal", "Faith", "Reviews", "Partner", "Family"}
 
     for rel, note in notes.items():
-        top_folder = rel.split("/")[0] if "/" in rel else ""
-        if top_folder in skip_folders:
+        # Check every folder segment, not just the first: a vault nested under a
+        # prefix (e.g. `personal/Daily/...`) still needs `Daily` to be recognized,
+        # not just a vault-root-relative `Daily/...`. `rel` is built via
+        # str(Path.relative_to(...)), which is backslash-separated on Windows, so
+        # split on both separators rather than "/" alone (the original top-folder
+        # check silently never matched on Windows for this same reason).
+        folder_parts = rel.replace("\\", "/").split("/")[:-1]
+        if any(p in skip_folders for p in folder_parts):
             continue
         if rel in ("Home.md", "_CLAUDE.md"):
             continue
@@ -647,10 +658,15 @@ def check_stale_tasks(notes: dict) -> list:
 def check_missing_frontmatter(notes: dict) -> list:
     issues = []
     skip = {"Templates", "_trash", ".obsidian"}
+    # Matched by basename, not full rel path: these files are exempt wherever
+    # they live (e.g. `personal/_CLAUDE.md`, `personal/log.md`), not only at the
+    # vault root - the same nesting gap that hit check_orphans's skip_folders.
+    skip_basenames = {"Home.md", "_CLAUDE.md", "log.md"}
     for rel, note in notes.items():
         if any(s in rel for s in skip):
             continue
-        if rel in ("Home.md", "_CLAUDE.md"):
+        basename = rel.replace("\\", "/").rsplit("/", 1)[-1]
+        if basename in skip_basenames:
             continue
         if note.get("code_fence_wrapped"):
             # Reported by check_code_fence_wrapped instead. The frontmatter exists but is
@@ -744,7 +760,7 @@ def check_byte_corruption(vault: Path) -> list:
         parts = md.relative_to(vault).parts
         if any(p in EXCLUDE_DIRS for p in parts):
             continue
-        rel = str(md.relative_to(vault))
+        rel = md.relative_to(vault).as_posix()
         try:
             raw = md.read_bytes()
         except OSError:
