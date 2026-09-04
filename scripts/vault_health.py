@@ -632,8 +632,12 @@ def _orphan_exempt_folder(rel: str) -> bool:
     parts = rel.lower().split("/")
     if len(parts) < 2:
         return False  # a note at the vault root is never exempt
-    head = parts[1] if parts[0] == "wiki" and len(parts) > 2 else parts[0]
-    return head.replace("-", " ").replace("_", " ") in _ORPHAN_EXEMPT_FOLDERS
+    # Any folder segment, not just the first: a vault nested under a prefix
+    # (e.g. `personal/Daily/...`) still needs `Daily` recognized.
+    return any(
+        p.replace("-", " ").replace("_", " ") in _ORPHAN_EXEMPT_FOLDERS
+        for p in parts[:-1]
+    )
 
 
 def check_orphans(notes: dict) -> list:
@@ -829,7 +833,7 @@ def check_byte_corruption(vault: Path) -> list:
         parts = md.relative_to(vault).parts
         if any(p in EXCLUDE_DIRS for p in parts):
             continue
-        rel = str(md.relative_to(vault))
+        rel = md.relative_to(vault).as_posix()
         try:
             raw = md.read_bytes()
         except OSError:

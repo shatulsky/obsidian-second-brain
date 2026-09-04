@@ -11,7 +11,10 @@ Checks (same as the .sh): frontmatter delimiters, no tabs in frontmatter,
 required fields (date/type/tags/ai-first), '## For future Claude' preamble,
 banned non-ASCII substitution characters, secret material (private keys,
 AWS/GitHub/Slack/Google API keys, quoted passwords - ported from the .sh's
-v0.14.0 check 6).
+v0.14.0 check 6), and Obsidian tag syntax (ported from the .sh's v0.15.0
+check 7 - the .sh's own implementation of this check is itself Python,
+shelled out via `python3 -`; re-implemented natively here against the
+already-parsed `fm` lines instead of re-parsing the raw frontmatter text).
 
 Vault-convention exceptions (per this vault's _CLAUDE.md, added in this port):
   - Daily/     : only date + tags required (Section 5) - preamble still checked
@@ -39,6 +42,50 @@ SECRET_PATTERNS = [
     (re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"), "Google API key"),
     (re.compile(r"(?i)\b(?:password|passwd)\s*[:=]\s*['\"][^'\"\s]{8,}['\"]"), "quoted password assignment"),
 ]
+
+TAG_ALLOWED = re.compile(r"^[\w/-]+$", re.UNICODE)   # \w is Unicode-aware: letters, digits, underscore
+TAG_HAS_NON_DIGIT = re.compile(r"[^\d/]")
+
+
+def _tags_from_frontmatter(fm: list) -> list:
+    """Mirrors the .sh's v0.15.0 check 7 tag extraction: inline `[a, b]`,
+    scalar, and block `- item` forms. Only the first `tags:` line is read -
+    same as upstream."""
+    for i, line in enumerate(fm):
+        m = re.match(r"^tags:\s*(.*)$", line)
+        if not m:
+            continue
+        rest = m.group(1).strip()
+        if rest.startswith('['):
+            inner = rest.strip('[]')
+            return [t.strip().strip("'\"") for t in inner.split(',') if t.strip()]
+        if rest:
+            return [rest.strip("'\"")]
+        tags = []
+        for nxt in fm[i + 1:]:
+            lm = re.match(r"^\s+-\s*(.+?)\s*$", nxt)
+            if not lm:
+                break
+            tags.append(lm.group(1).strip().strip("'\""))
+        return tags
+    return []
+
+
+def _tag_problem(tag: str):
+    """Same rule as the .sh/vault_health.py check_tag_syntax - keep all three in step."""
+    t = tag.lstrip('#')
+    if not t:
+        return 'empty tag'
+    if ' ' in t or '\t' in t:
+        return 'contains whitespace (Obsidian cannot render it) - use `-` between words'
+    if '.' in t:
+        return 'contains `.` (Obsidian cannot render it) - use `-` or spell it out'
+    if not TAG_ALLOWED.match(t):
+        return 'contains characters outside letters/digits/_/-// (Obsidian cannot render it)'
+    if not TAG_HAS_NON_DIGIT.search(t):
+        return f'is digits only (Obsidian renders it struck through) - prefix a word, e.g. `store-{t}`'
+    return None
+
 
 BANNED = {
     '—': ('U+2014 em-dash', ' - '),
@@ -127,11 +174,16 @@ def main() -> int:
         if not any(line.split('#')[0].strip() == 'ai-first: true' for line in fm):
             warnings.append(f"{basename} missing 'ai-first: true' in frontmatter.")
 
-    # Check 4: 'For future Claude' preamble
-    if not any(line.startswith('## ') and line[3:].lstrip().startswith('For future Claude')
+    # Check 4: 'For future <agent|AI|Claude|Codex>' preamble - v0.15.0 widened the
+    # accepted spelling from Claude-only to any of the four; this vault's own
+    # convention (_CLAUDE.md) still asks for 'For future Claude' by default, but
+    # all four are accepted here so the hook doesn't false-positive-warn on either
+    # spelling.
+    PREAMBLE_LABELS = ('For future agent', 'For future AI', 'For future Claude', 'For future Codex')
+    if not any(line.startswith('## ') and line[3:].lstrip().startswith(PREAMBLE_LABELS)
                for line in body):
         warnings.append(
-            f"{basename} missing '## For future Claude' preamble "
+            f"{basename} missing a '## For future <agent|AI|Claude|Codex>' preamble "
             f'(required by ai-first-rules.md rule #2).')
 
     # Check 5: banned non-ASCII substitution characters
@@ -161,6 +213,18 @@ def main() -> int:
     if secret_hits:
         warnings.append(f'{basename} appears to contain secret material:')
         warnings.extend(secret_hits)
+
+    # Check 7: Obsidian tag syntax (v0.15.0) - a tag Obsidian can't render is
+    # struck through with no error anywhere, so this is the only place an
+    # agent would ever learn it wrote one.
+    tag_hits = []
+    for tag in _tags_from_frontmatter(fm):
+        why = _tag_problem(tag)
+        if why:
+            tag_hits.append(f'    tag `{tag}` {why}')
+    if tag_hits:
+        warnings.append(f'{basename} has tags Obsidian will render broken (no error is ever shown for these):')
+        warnings.extend(tag_hits)
 
     if warnings:
         sys.stderr.write(f'AI-first warnings on {basename}:\n')
