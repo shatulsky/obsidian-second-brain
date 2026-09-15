@@ -7,20 +7,26 @@ referenced a non-existent validate-ai-first.ps1, so every Write/Edit printed
 was written first but powershell.exe hangs reading piped stdin (console-host
 quirk, reproduced with minimal probes) - Python reads hook stdin reliably.
 
-Checks (same as the .sh): frontmatter delimiters, no tabs in frontmatter,
-required fields (date/type/tags/ai-first), '## For future Claude' preamble,
-banned non-ASCII substitution characters, secret material (private keys,
-AWS/GitHub/Slack/Google API keys, quoted passwords - ported from the .sh's
-v0.14.0 check 6), and Obsidian tag syntax (ported from the .sh's v0.15.0
-check 7 - the .sh's own implementation of this check is itself Python,
-shelled out via `python3 -`; re-implemented natively here against the
+Checks (same as the .sh, kept in step through v0.16.0): frontmatter
+delimiters, no tabs in frontmatter, required fields (date/type/tags/ai-first),
+a '## For future <agent|AI|Claude|Codex>' preamble or its Obsidian callout
+form '> [!info]- For future agent' (#237), banned non-ASCII substitution
+characters - skipped line-by-line on CJK text, where the same codepoints are
+that language's own punctuation, not a substitution (#271) - secret material
+(private keys, AWS/GitHub/Slack/Google API keys, quoted passwords - ported
+from the .sh's v0.14.0 check 6), and Obsidian tag syntax (ported from the
+.sh's v0.15.0 check 7 - the .sh's own implementation of this check is itself
+Python, shelled out via `python3 -`; re-implemented natively here against the
 already-parsed `fm` lines instead of re-parsing the raw frontmatter text).
+AI_FIRST_SKIP_CHECKS (env, comma-separated check numbers) disables individual
+checks, same as the .sh.
 
 Vault-convention exceptions (per this vault's _CLAUDE.md, added in this port):
   - Daily/     : only date + tags required (Section 5) - preamble still checked
-  - Logs/      : skipped entirely (minimal frontmatter by design)
-  - log.md     : skipped (pointer file)
-  - catchup.md : skipped (bot-written queue)
+  - Logs/, boards/, Boards/, .claude/ : skipped entirely (operating surfaces,
+    not knowledge notes - matches the .sh's skip case statement)
+  - log.md, catchup.md, _CLAUDE.md, Home.md, index.md : skipped (vault-surface
+    files, not notes)
 
 Exit codes:
   0 = pass / out of scope (silent)
@@ -87,19 +93,41 @@ def _tag_problem(tag: str):
     return None
 
 
-BANNED = {
+# Substitutions that only make sense as ENGLISH-prose damage: an em-dash where
+# a hyphen belongs, curly quotes where straight ones do. Skipped on a line
+# containing CJK text (see CJK_RE below), where the same codepoints are that
+# language's own correct punctuation (#271).
+ASCII_CONTEXT = {
     '—': ('U+2014 em-dash', ' - '),
     '–': ('U+2013 en-dash', ' - '),
     '“': ('U+201C left double quote', '"'),
     '”': ('U+201D right double quote', '"'),
     '‘': ('U+2018 left single quote', "'"),
     '’': ('U+2019 right single quote', "'"),
+    '…': ('U+2026 ellipsis', '...'),
+}
+
+# Substitutions banned in every language: no script writes >= as U+2265, and a
+# non-breaking space is invisible damage wherever it lands.
+ALWAYS = {
     '≥': ('U+2265 >=', '>='),
     '≤': ('U+2264 <=', '<='),
     '≠': ('U+2260 !=', '!='),
-    '…': ('U+2026 ellipsis', '...'),
     ' ': ('U+00A0 non-breaking space', ' '),
 }
+
+BANNED = {**ALWAYS, **ASCII_CONTEXT}
+
+# Han, kana, Hangul, and the CJK punctuation/fullwidth blocks. One of these on
+# a line means the line's punctuation belongs to its own language, not to an
+# English default. Line-level on purpose, matching the .sh's own tradeoff: a
+# false negative on a mixed line costs one stray em-dash, a false positive
+# costs the hook its credibility.
+CJK_RE = re.compile(
+    '[ᄀ-ᇿ　-〿぀-ヿ㐀-䶿一-鿿'
+    'ꥠ-꥿가-힯豈-﫿＀-￯]'
+    '|[𠀀-𯨟]'
+)
 
 
 def main() -> int:
@@ -125,12 +153,23 @@ def main() -> int:
 
     rel = file_path[len(vault) + 1:]
     parts = rel.split('/')
-    skip_dirs = {'raw', 'templates', '_export', '.obsidian', '.git', '.trash', 'Logs'}
+    # Mirrors the .sh's skip case statement: raw/templates/_export/.obsidian/.git/
+    # .trash/.claude (slash-command copies and settings, not notes - #249),
+    # boards/Boards (kanban exception: an H2 preamble renders as a phantom
+    # column), Logs (per-day operation logs), plus the vault-surface files below.
+    skip_dirs = {'raw', 'templates', '_export', '.obsidian', '.git', '.trash',
+                 '.claude', 'boards', 'Boards', 'Logs'}
     if any(p in skip_dirs for p in parts[:-1]):
         return 0
-    if rel.lower() in ('log.md', 'catchup.md'):
+    if rel.lower() in ('log.md', 'catchup.md', '_claude.md', 'home.md', 'index.md'):
         return 0
     is_daily = parts[0] == 'Daily'
+
+    skip_raw = os.environ.get('AI_FIRST_SKIP_CHECKS', '')
+    skip_checks = {s.strip() for s in skip_raw.split(',') if s.strip()}
+
+    def check_enabled(n: int) -> bool:
+        return str(n) not in skip_checks
 
     basename = os.path.basename(file_path)
     try:
@@ -157,45 +196,56 @@ def main() -> int:
         body = lines[close_idx + 1:]
 
     # Check 2: tabs in frontmatter
-    if any('\t' in line for line in fm):
+    if check_enabled(2) and any('\t' in line for line in fm):
         warnings.append(f'{basename} frontmatter contains tab characters. YAML requires spaces only.')
 
     # Check 3: required AI-first fields
     def has_field(key: str) -> bool:
         return any(line.startswith(key + ':') for line in fm)
 
-    if not has_field('date'):
-        warnings.append(f"{basename} missing 'date:' in frontmatter.")
-    if not has_field('tags'):
-        warnings.append(f"{basename} missing 'tags:' in frontmatter.")
-    if not is_daily:
-        if not has_field('type'):
-            warnings.append(f"{basename} missing 'type:' in frontmatter.")
-        if not any(line.split('#')[0].strip() == 'ai-first: true' for line in fm):
-            warnings.append(f"{basename} missing 'ai-first: true' in frontmatter.")
+    if check_enabled(3):
+        if not has_field('date'):
+            warnings.append(f"{basename} missing 'date:' in frontmatter.")
+        if not has_field('tags'):
+            warnings.append(f"{basename} missing 'tags:' in frontmatter.")
+        if not is_daily:
+            if not has_field('type'):
+                warnings.append(f"{basename} missing 'type:' in frontmatter.")
+            if not any(line.split('#')[0].strip() == 'ai-first: true' for line in fm):
+                warnings.append(f"{basename} missing 'ai-first: true' in frontmatter.")
 
-    # Check 4: 'For future <agent|AI|Claude|Codex>' preamble - v0.15.0 widened the
-    # accepted spelling from Claude-only to any of the four; this vault's own
-    # convention (_CLAUDE.md) still asks for 'For future Claude' by default, but
-    # all four are accepted here so the hook doesn't false-positive-warn on either
-    # spelling.
-    PREAMBLE_LABELS = ('For future agent', 'For future AI', 'For future Claude', 'For future Codex')
-    if not any(line.startswith('## ') and line[3:].lstrip().startswith(PREAMBLE_LABELS)
-               for line in body):
+    # Check 4: 'For future <agent|AI|Claude|Codex>' preamble - accepts the
+    # '## ' heading form every command writes, and the Obsidian callout form
+    # '> [!info]- For future agent' (any callout type, folded or not) a vault
+    # may prefer so a human sees the note content first (#237). This vault's
+    # own convention (_CLAUDE.md) still asks for 'For future Claude' by
+    # default, but all four spellings are accepted so the hook doesn't
+    # false-positive-warn on the others.
+    PREAMBLE_RE = re.compile(
+        r'^(##\s+|>\s*\[![A-Za-z][A-Za-z0-9_-]*\][-+]?\s+)'
+        r'For future (agent|AI|Claude|Codex)\s*$')
+    if check_enabled(4) and not any(PREAMBLE_RE.match(line) for line in body):
         warnings.append(
             f"{basename} missing a '## For future <agent|AI|Claude|Codex>' preamble "
-            f'(required by ai-first-rules.md rule #2).')
+            f"(or its callout form '> [!info]- For future agent'; required by "
+            f'ai-first-rules.md rule #2).')
 
-    # Check 5: banned non-ASCII substitution characters
+    # Check 5: banned non-ASCII substitution characters. Dashes/quotes/ellipsis
+    # are that language's correct punctuation on a line containing CJK text
+    # (Han, kana, Hangul, CJK punctuation/fullwidth blocks) - rewriting those to
+    # ASCII would be a typography error, not a fix (#271) - so ASCII_CONTEXT is
+    # skipped line-by-line wherever CJK is present; ALWAYS (>=, <=, !=, NBSP)
+    # stays banned in every language.
     hits = []
     for lineno, line in enumerate(lines, 1):
+        banned = ALWAYS if CJK_RE.search(line) else BANNED
         seen_on_line = set()
         for ch in line:
-            if ch in BANNED and ch not in seen_on_line:
+            if ch in banned and ch not in seen_on_line:
                 seen_on_line.add(ch)
-                name, suggest = BANNED[ch]
+                name, suggest = banned[ch]
                 hits.append(f'    line {lineno}: {name} -- try {suggest!r}')
-    if hits:
+    if check_enabled(5) and hits:
         warnings.append(f'{basename} contains banned non-ASCII substitution characters:')
         warnings.extend(hits)
 
@@ -210,7 +260,7 @@ def main() -> int:
                     f'vault notes; keep them in ~/.config/obsidian-second-brain/.env or a '
                     f'password manager and reference them by NAME only')
                 break
-    if secret_hits:
+    if check_enabled(6) and secret_hits:
         warnings.append(f'{basename} appears to contain secret material:')
         warnings.extend(secret_hits)
 
@@ -222,7 +272,7 @@ def main() -> int:
         why = _tag_problem(tag)
         if why:
             tag_hits.append(f'    tag `{tag}` {why}')
-    if tag_hits:
+    if check_enabled(7) and tag_hits:
         warnings.append(f'{basename} has tags Obsidian will render broken (no error is ever shown for these):')
         warnings.extend(tag_hits)
 
