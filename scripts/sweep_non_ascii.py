@@ -5,7 +5,6 @@ Dry-run by default; pass --apply to write changes.
 
 Skips:
   - hooks/validate-ai-first.sh (detection dict contains intentional banned chars)
-  - hooks/validate-ai-first.py (Windows Python port of the same hook - same reason)
   - Lines inside Markdown code fences (``` / ~~~)
   - Inline backtick code spans within lines
   - [[wikilink]] interiors: a dash inside a link is part of a FILENAME, not
@@ -44,7 +43,7 @@ SUBSTITUTIONS = [
 ]
 
 # Files with intentional banned chars (e.g. detection dict keys)
-SKIP_FILES = {'hooks/validate-ai-first.sh', 'hooks/validate-ai-first.py', 'scripts/sweep_non_ascii.py', 'README.md'}
+SKIP_FILES = {'hooks/validate-ai-first.sh', 'scripts/sweep_non_ascii.py', 'README.md'}
 
 CODE_SPAN_RE = re.compile(r'(`+)(.+?)\1', re.DOTALL)
 FENCE_RE = re.compile(r'^[ \t]*(`{3,}|~{3,})')
