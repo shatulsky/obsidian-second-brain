@@ -831,7 +831,7 @@ def check_byte_corruption(vault: Path) -> list:
     bom = b"\xef\xbb\xbf"
     for md in vault.rglob("*.md"):
         parts = md.relative_to(vault).parts
-        if any(p in EXCLUDE_DIRS for p in parts):
+        if _is_hidden(parts) or any(p in EXCLUDE_DIRS for p in parts):
             continue
         rel = md.relative_to(vault).as_posix()
         try:
